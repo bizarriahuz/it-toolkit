@@ -1,0 +1,170 @@
+#Requires -Version 5.1
+# IT Toolkit - Internal maintenance utility
+
+# Enforce TLS 1.2 for older Windows versions
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# --- Self-elevate to Administrator ---
+if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Elevating to Administrator..." -ForegroundColor Yellow
+    # This works for both the USB script AND the web irm command
+    $scriptPath = $MyInvocation.MyCommand.Definition
+    if ($scriptPath -like "*toolkit.ps1*" -or $scriptPath -like "*toolkit.txt*") {
+        Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    } else {
+        Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm 'https://raw.githubusercontent.com/bizarriahuz/it-toolkit/main/toolkit.txt' | iex`""
+    }
+    return
+}
+
+# --- Helper functions ---
+function Write-Header($text) {
+    Clear-Host
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host "  $text" -ForegroundColor Cyan
+    Write-Host "===============================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+function Write-OK($msg)   { Write-Host "[ OK ] $msg" -ForegroundColor Green }
+function Write-Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
+function Write-Err($msg)  { Write-Host "[FAIL] $msg" -ForegroundColor Red }
+
+# --- Menu actions ---
+function Install-Action1 {
+    Write-Header "Install Action1 Agent"
+    $msiUrl = "https://app.na-2.action1.com/agent/21c1cc54-c786-11f1-9f08-c1a2c9c50f19/windows/agent(New_Endpoints).msi" 
+    $msiPath = "$env:TEMP\action1_agent.msi"
+    try {
+        Write-Host "Downloading MSI (Requires Internet)..."
+        Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+        Write-Host "Installing silently..."
+        Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /quiet /qn /norestart" -Wait
+        Write-OK "Action1 agent installed."
+    } catch { Write-Err $_.Exception.Message }
+    Pause
+}
+
+function Remove-Atera {
+    Write-Header "Remove Atera Agent"
+    $paths = @(
+        "$env:ProgramFiles\ATERA Networks",
+        "${env:ProgramFiles(x86)}\ATERA Networks"
+    )
+    $found = $paths | Where-Object { Test-Path $_ }
+    if (-not $found) { Write-Warn "Atera not found on this machine."; Pause; return }
+
+    Get-Service -Name "Atera*" -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host "Stopping service: $($_.Name)"
+        Stop-Service $_.Name -Force -ErrorAction SilentlyContinue
+    }
+    Get-Process -Name "Atera*" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    $found | ForEach-Object {
+        Write-Host "Removing: $_"
+        Remove-Item $_ -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-OK "Atera cleanup complete. Reboot recommended."
+    Pause
+}
+
+function Invoke-Cleanup {
+    Write-Header "System Cleanup"
+    $before = (Get-PSDrive C).Free
+    Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+    Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+    $after = (Get-PSDrive C).Free
+    $freed = [math]::Round(($after - $before)/1MB, 2)
+    Write-OK "Freed approximately $freed MB."
+    Pause
+}
+
+function Get-SystemHealth {
+    Write-Header "System Health Report"
+    $os     = Get-CimInstance Win32_OperatingSystem
+    $cs     = Get-CimInstance Win32_ComputerSystem
+    $disk   = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+    $batt   = Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue
+    $defender = Get-MpComputerStatus -ErrorAction SilentlyContinue
+
+    Write-Host "Hostname      : $($cs.Name)"
+    Write-Host "Model         : $($cs.Manufacturer) $($cs.Model)"
+    Write-Host "OS            : $($os.Caption) $($os.Version)"
+    Write-Host "Last Boot     : $($os.LastBootUpTime)"
+    Write-Host ("C: Free       : {0:N2} GB / {1:N2} GB" -f ($disk.FreeSpace/1GB), ($disk.Size/1GB))
+    Write-Host "Pending Reboot: $([bool](Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired'))"
+    if ($batt) { Write-Host "Battery       : $($batt.EstimatedChargeRemaining)% remaining" }
+    if ($defender) {
+        Write-Host "Defender AV   : RealTime=$($defender.RealTimeProtectionEnabled) | SignatureAge=$($defender.AntivirusSignatureAge)d"
+    }
+    Pause
+}
+
+function Repair-DomainTrust {
+    Write-Header "Repair Domain Trust Relationship"
+
+    $cs = Get-CimInstance Win32_ComputerSystem
+    if ($cs.PartOfDomain -eq $false) {
+        Write-Err "This computer is not joined to a domain."
+        Pause
+        return
+    }
+
+    Write-Host "Computer Name : $($cs.Name)"
+    Write-Host "Domain        : $($cs.Domain)"
+    Write-Host ""
+
+    Write-Host "Testing connection to domain controller..." -NoNewline
+    if (Test-ComputerSecureChannel -ErrorAction SilentlyContinue) {
+        Write-OK " Secure channel is currently HEALTHY. No repair needed."
+        Pause
+        return
+    } else {
+        Write-Warn " Secure channel is BROKEN."
+    }
+
+    Write-Host ""
+    Write-Host "This will attempt to reset the machine password in Active Directory." -ForegroundColor Yellow
+    Write-Host "You MUST provide Domain Admin credentials to proceed." -ForegroundColor Yellow
+    Write-Host ""
+
+    $confirm = Read-Host "Do you want to attempt the repair? (Y/N)"
+    if ($confirm -match '^[Yy]') {
+        try {
+            Write-Host "Attempting repair..." -NoNewline
+            $result = Test-ComputerSecureChannel -Repair -Credential (Get-Credential) -ErrorAction Stop
+            if ($result) {
+                Write-OK " Success!"
+                Write-Host "Please restart the computer for changes to take effect." -ForegroundColor Green
+            }
+        } catch {
+            Write-Err " Failed."
+            Write-Host $_.Exception.Message -ForegroundColor Red
+            Write-Host "If this failed, the computer may need to be removed and re-joined to the domain manually." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "Repair cancelled."
+    }
+    Pause
+}
+
+# --- Menu loop ---
+do {
+    Write-Header "IT Toolkit - Maintenance Menu"
+    Write-Host "  1) Install Action1 Agent"
+    Write-Host "  2) Remove Atera Agent"
+    Write-Host "  3) System Cleanup (temp/recycle bin)"
+    Write-Host "  4) System Health Report"
+    Write-Host "  5) Repair Domain Trust Relationship" -ForegroundColor Yellow
+    Write-Host "  Q) Quit"
+    Write-Host ""
+    $choice = Read-Host "Select an option"
+    switch ($choice.ToUpper()) {
+        "1" { Install-Action1 }
+        "2" { Remove-Atera }
+        "3" { Invoke-Cleanup }
+        "4" { Get-SystemHealth }
+        "5" { Repair-DomainTrust }
+        "Q" { break }
+        default { Write-Warn "Invalid option."; Start-Sleep 1 }
+    }
+} while ($choice.ToUpper() -ne "Q")

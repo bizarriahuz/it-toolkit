@@ -8,9 +8,14 @@
 # This checks if you are running as Admin. If not, it elevates.
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Elevating to Administrator..." -ForegroundColor Yellow
+<<<<<<< HEAD
     # %~dp0 logic is handled by the .bat file, so we just relaunch the local script
     $scriptPath = $MyInvocation.MyCommand.Definition
     Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+=======
+    $scriptUrl = "https://raw.githubusercontent.com/bizarriahuz/it-toolkit/main/toolkit.txt"   # <-- Your real URL
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm '$scriptUrl' | iex`""
+>>>>>>> df7a6ed8d5fdebdaf0ea07c0783e533dd8365448
     return
 }
 

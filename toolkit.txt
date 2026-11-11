@@ -28,7 +28,7 @@ function Write-OK($msg)   { Write-Host "[ OK ] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "[WARN] $msg" -ForegroundColor Yellow }
 function Write-Err($msg)  { Write-Host "[FAIL] $msg" -ForegroundColor Red }
 
-# --- Menu actions ---
+# --- Setup & Deployment ---
 function Install-Action1 {
     Write-Header "Install Action1 Agent"
     $msiUrl = "https://app.na-2.action1.com/agent/21c1cc54-c786-11f1-9f08-c1a2c9c50f19/windows/agent(New_Endpoints).msi" 
@@ -65,18 +65,30 @@ function Remove-Atera {
     Pause
 }
 
-function Invoke-Cleanup {
-    Write-Header "System Cleanup"
-    $before = (Get-PSDrive C).Free
-    Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-    Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-    $after = (Get-PSDrive C).Free
-    $freed = [math]::Round(($after - $before)/1MB, 2)
-    Write-OK "Freed approximately $freed MB."
+function Install-StandardApps {
+    Write-Header "Install Standard Apps (via Winget)"
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Err "Winget is not installed on this machine."
+        Pause
+        return
+    }
+    
+    $apps = @(
+        "Google.Chrome",
+        "7zip.7zip",
+        "Adobe.Acrobat.Reader.64-bit",
+        "Notepad++.Notepad++"
+    )
+    
+    foreach ($app in $apps) {
+        Write-Host "Installing $app..." -ForegroundColor Yellow
+        winget install --id $app --silent --accept-package-agreements --accept-source-agreements
+    }
+    Write-OK "App installation complete."
     Pause
 }
 
+# --- System & Troubleshooting ---
 function Get-SystemHealth {
     Write-Header "System Health Report"
     $os     = Get-CimInstance Win32_OperatingSystem
@@ -151,27 +163,63 @@ function Invoke-GPUpdate {
     Pause
 }
 
-function Reset-PrintSpooler {
-    Write-Header "Clear Print Spooler Queue"
-    Write-Host "Stopping Print Spooler service..." -NoNewline
-    Stop-Service -Name Spooler -Force -ErrorAction SilentlyContinue
-    Write-OK " Stopped."
-    Write-Host "Clearing stuck print jobs..." -NoNewline
-    Remove-Item "C:\Windows\System32\spool\PRINTERS\*" -Force -ErrorAction SilentlyContinue
-    Write-OK " Cleared."
-    Write-Host "Starting Print Spooler service..." -NoNewline
-    Start-Service -Name Spooler -ErrorAction SilentlyContinue
-    Write-OK " Started."
-    Write-Host "Printer queue reset. Try printing again." -ForegroundColor Green
+function Reset-WindowsUpdate {
+    Write-Header "Reset Windows Update Cache"
+    Write-Host "Stopping services..." -NoNewline
+    Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name bits -Force -ErrorAction SilentlyContinue
+    Write-OK " Done."
+    
+    Write-Host "Clearing SoftwareDistribution..." -NoNewline
+    Remove-Item "C:\Windows\SoftwareDistribution\*" -Recurse -Force -ErrorAction SilentlyContinue
+    Write-OK " Done."
+    
+    Write-Host "Restarting services..." -NoNewline
+    Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+    Start-Service -Name bits -ErrorAction SilentlyContinue
+    Write-OK " Done."
+    
+    Write-Host "Windows Update cache reset. Try checking for updates again." -ForegroundColor Green
     Pause
 }
 
-function Get-UserInfo {
-    Write-Header "User & Admin Info"
-    Write-Host "--- Currently Logged In Users ---" -ForegroundColor Cyan
-    (Get-CimInstance Win32_ComputerSystem).UserName
-    Write-Host "`n--- Local Administrators ---" -ForegroundColor Cyan
-    Get-LocalGroupMember -Group "Administrators" | Select-Object Name, PrincipalSource | Format-Table -AutoSize
+function Repair-WindowsSystem {
+    Write-Header "Scan & Repair Windows System Files"
+    Write-Warn "This process can take 15-30 minutes. Do not close the window."
+    $confirm = Read-Host "Do you want to proceed? (Y/N)"
+    if ($confirm -match '^[Yy]') {
+        Write-Host "`n1. Running System File Checker (SFC)..." -ForegroundColor Yellow
+        sfc /scannow
+        
+        Write-Host "`n2. Running DISM Image Repair..." -ForegroundColor Yellow
+        DISM /Online /Cleanup-Image /RestoreHealth
+        
+        Write-OK "Repair process complete. Reboot recommended."
+    } else {
+        Write-Host "Cancelled."
+    }
+    Pause
+}
+
+function Get-TopProcesses {
+    Write-Header "Top 5 Resource-Hogging Processes"
+    Write-Host "--- Top 5 by CPU ---" -ForegroundColor Cyan
+    Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 Name, @{Name="CPU(s)";Expression={[math]::Round($_.CPU, 2)}} | Format-Table -AutoSize
+    
+    Write-Host "--- Top 5 by RAM (Working Set) ---" -ForegroundColor Cyan
+    Get-Process | Sort-Object WorkingSet -Descending | Select-Object -First 5 Name, @{Name="RAM(MB)";Expression={[math]::Round($_.WorkingSet / 1MB, 2)}} | Format-Table -AutoSize
+    Pause
+}
+
+# --- Network & Hardware ---
+function Get-NetworkAndSessions {
+    Write-Header "User Sessions & IP Addresses"
+    Write-Host "--- Active User Sessions ---" -ForegroundColor Cyan
+    query user 2>$null
+    if (-not $?) { Write-Host "No interactive users logged in." }
+    
+    Write-Host "`n--- IPv4 Addresses ---" -ForegroundColor Cyan
+    Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.IPAddress -notlike "127.*" -and $_.IPAddress -notlike "169.254.*" } | Select-Object InterfaceAlias, IPAddress | Format-Table -AutoSize
     Pause
 }
 
@@ -191,6 +239,142 @@ function Reset-Network {
     Pause
 }
 
+function Get-WiFiPasswords {
+    Write-Header "Saved Wi-Fi Passwords"
+    $profiles = netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object { $_.ToString().Split(":")[1].Trim() }
+    
+    if (-not $profiles) {
+        Write-Warn "No saved Wi-Fi profiles found."
+        Pause
+        return
+    }
+
+    foreach ($profile in $profiles) {
+        $details = netsh wlan show profile name="$profile" key=clear
+        $passwordLine = $details | Select-String "Key Content" 
+        
+        if ($passwordLine) {
+            $password = $passwordLine.ToString().Split(":")[1].Trim()
+            Write-Host "Network: " -NoNewline; Write-Host $profile -ForegroundColor Cyan -NoNewline
+            Write-Host " | Password: " -NoNewline; Write-Host $password -ForegroundColor Green
+        } else {
+            Write-Host "Network: " -NoNewline; Write-Host $profile -ForegroundColor Cyan -NoNewline
+            Write-Host " | Password: [Open/No Password]" -ForegroundColor Gray
+        }
+    }
+    Pause
+}
+
+function Get-DiskHealth {
+    Write-Header "Physical Disk Health (SMART)"
+    $disks = Get-PhysicalDisk
+    foreach ($disk in $disks) {
+        Write-Host "Drive: $($disk.FriendlyName)" -ForegroundColor Cyan
+        if ($disk.HealthStatus -eq "Healthy") {
+            Write-OK " Status: Healthy"
+        } else {
+            Write-Err " Status: $($disk.HealthStatus) - WARNING!"
+        }
+        Write-Host " Media Type: $($disk.MediaType)"
+        Write-Host ""
+    }
+    Pause
+}
+
+function Get-DriveWear {
+    Write-Header "Drive Wear & Tear (SSD/HDD)"
+    $disks = Get-PhysicalDisk
+    foreach ($disk in $disks) {
+        Write-Host "Drive: $($disk.FriendlyName)" -ForegroundColor Cyan
+        $wear = $disk | Get-StorageReliabilityCounter | Select-Object -ExpandProperty Wear
+        
+        if ($null -ne $wear) {
+            if ($wear -gt 80) {
+                Write-Err " Wear Level: $wear% - CRITICAL! Drive needs replacing soon."
+            } elseif ($wear -gt 50) {
+                Write-Warn " Wear Level: $wear% - Keep an eye on this one."
+            } else {
+                Write-OK " Wear Level: $wear% - Drive is in great shape."
+            }
+        } else {
+            Write-Host " Wear Level: Not supported by this drive." -ForegroundColor Gray
+        }
+        Write-Host ""
+    }
+    Pause
+}
+
+function Get-BatteryReport {
+    Write-Header "Generate Battery Health Report"
+    $reportPath = "$env:USERPROFILE\battery-report.html"
+    Write-Host "Generating report..." -NoNewline
+    powercfg /batteryreport /output $reportPath | Out-Null
+    Write-OK " Done."
+    Write-Host "Report saved to: $reportPath" -ForegroundColor Green
+    Write-Host "Open this file in a browser to see battery design capacity vs. current capacity." -ForegroundColor Yellow
+    Pause
+}
+
+function Get-EncryptionStatus {
+    Write-Header "BitLocker & Activation Status"
+    
+    Write-Host "--- BitLocker Status ---" -ForegroundColor Cyan
+    try {
+        $bl = Get-BitLockerVolume -MountPoint "C:" -ErrorAction Stop
+        Write-Host "Volume C: Status : $($bl.ProtectionStatus)"
+        Write-Host "Encryption %     : $($bl.EncryptionPercentage)%"
+        if ($bl.ProtectionStatus -eq "Off") {
+            Write-Warn "BitLocker is NOT enabled on C:!"
+        } else {
+            Write-OK "BitLocker protection is active."
+        }
+    } catch {
+        Write-Warn "BitLocker cmdlets not available (requires Windows Pro/Enterprise)."
+    }
+
+    Write-Host "`n--- Windows Activation ---" -ForegroundColor Cyan
+    try {
+        $status = Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL AND LicenseStatus=1"
+        if ($status) {
+            Write-OK "Windows is activated."
+            Write-Host "Product: $($status.Name)"
+        } else {
+            Write-Warn "Windows is NOT activated."
+        }
+    } catch {
+        Write-Warn "Could not determine activation status."
+    }
+    Pause
+}
+
+# --- Utility ---
+function Invoke-Cleanup {
+    Write-Header "System Cleanup"
+    $before = (Get-PSDrive C).Free
+    Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+    Clear-RecycleBin -Force -ErrorAction SilentlyContinue
+    $after = (Get-PSDrive C).Free
+    $freed = [math]::Round(($after - $before)/1MB, 2)
+    Write-OK "Freed approximately $freed MB."
+    Pause
+}
+
+function Reset-PrintSpooler {
+    Write-Header "Clear Print Spooler Queue"
+    Write-Host "Stopping Print Spooler service..." -NoNewline
+    Stop-Service -Name Spooler -Force -ErrorAction SilentlyContinue
+    Write-OK " Stopped."
+    Write-Host "Clearing stuck print jobs..." -NoNewline
+    Remove-Item "C:\Windows\System32\spool\PRINTERS\*" -Force -ErrorAction SilentlyContinue
+    Write-OK " Cleared."
+    Write-Host "Starting Print Spooler service..." -NoNewline
+    Start-Service -Name Spooler -ErrorAction SilentlyContinue
+    Write-OK " Started."
+    Write-Host "Printer queue reset. Try printing again." -ForegroundColor Green
+    Pause
+}
+
 function Remove-Bloatware {
     Write-Header "Remove Standard Windows Bloatware"
     $bloat = @(
@@ -207,34 +391,92 @@ function Remove-Bloatware {
     Pause
 }
 
+function Get-UserInfo {
+    Write-Header "User & Admin Info"
+    Write-Host "--- Currently Logged In Users ---" -ForegroundColor Cyan
+    (Get-CimInstance Win32_ComputerSystem).UserName
+    Write-Host "`n--- Local Administrators ---" -ForegroundColor Cyan
+    Get-LocalGroupMember -Group "Administrators" | Select-Object Name, PrincipalSource | Format-Table -AutoSize
+    Pause
+}
+
+function Restart-ToBIOS {
+    Write-Header "Restart to BIOS/UEFI"
+    Write-Warn "This will restart the computer immediately and boot into the BIOS."
+    $confirm = Read-Host "Are you sure? (Y/N)"
+    if ($confirm -match '^[Yy]') {
+        shutdown.exe /r /fw /t 0
+    } else {
+        Write-Host "Cancelled."
+    }
+}
+
 # --- Menu loop ---
 do {
     Write-Header "IT Toolkit - Maintenance Menu"
+    
+    Write-Host "--- Setup & Deployment ---" -ForegroundColor DarkGray
     Write-Host "  1) Install Action1 Agent"
     Write-Host "  2) Remove Atera Agent"
-    Write-Host "  3) System Cleanup (temp/recycle bin)"
+    Write-Host "  3) Install Standard Apps (Winget)"
+    
+    Write-Host "`n--- System & Troubleshooting ---" -ForegroundColor DarkGray
     Write-Host "  4) System Health Report"
     Write-Host "  5) Repair Domain Trust Relationship" -ForegroundColor Yellow
     Write-Host "  6) Force Group Policy Update"
-    Write-Host "  7) Clear Print Spooler (Fix stuck printers)"
-    Write-Host "  8) Show Logged-in Users & Local Admins"
-    Write-Host "  9) Flush DNS / Reset Network"
+    Write-Host "  7) Reset Windows Update Cache"
+    Write-Host "  8) Scan & Repair System Files (SFC/DISM)"
+    Write-Host "  9) Show Top 5 CPU/RAM Processes"
+    
+    Write-Host "`n--- Network & Hardware ---" -ForegroundColor DarkGray
+    Write-Host "  N) Show Sessions & IP Address"
+    Write-Host "  F) Flush DNS / Reset Network"
+    Write-Host "  Y) Show Saved Wi-Fi Passwords"
+    Write-Host "  D) Check Disk Health (SMART)"
+    Write-Host "  V) Check Drive Wear (SSD Health)"
+    Write-Host "  T) Generate Battery Report"
+    Write-Host "  A) Check BitLocker & Activation"
+    
+    Write-Host "`n--- Utility ---" -ForegroundColor DarkGray
+    Write-Host "  C) System Cleanup (temp/recycle bin)"
+    Write-Host "  P) Clear Print Spooler (Fix printers)"
     Write-Host "  B) Remove Windows Bloatware"
+    Write-Host "  U) Restart to BIOS/UEFI"
     Write-Host "  Q) Quit"
+    
     Write-Host ""
     $choice = Read-Host "Select an option"
     
     switch ($choice.ToUpper()) {
+        # Setup & Deployment
         "1" { Install-Action1 }
         "2" { Remove-Atera }
-        "3" { Invoke-Cleanup }
+        "3" { Install-StandardApps }
+        
+        # System & Troubleshooting
         "4" { Get-SystemHealth }
         "5" { Repair-DomainTrust }
         "6" { Invoke-GPUpdate }
-        "7" { Reset-PrintSpooler }
-        "8" { Get-UserInfo }
-        "9" { Reset-Network }
+        "7" { Reset-WindowsUpdate }
+        "8" { Repair-WindowsSystem }
+        "9" { Get-TopProcesses }
+        
+        # Network & Hardware
+        "N" { Get-NetworkAndSessions }
+        "F" { Reset-Network }
+        "Y" { Get-WiFiPasswords }
+        "D" { Get-DiskHealth }
+        "V" { Get-DriveWear }
+        "T" { Get-BatteryReport }
+        "A" { Get-EncryptionStatus }
+        
+        # Utility
+        "C" { Invoke-Cleanup }
+        "P" { Reset-PrintSpooler }
         "B" { Remove-Bloatware }
+        "U" { Restart-ToBIOS }
+        
+        # Quit
         "Q" { break }
         default { Write-Warn "Invalid option."; Start-Sleep 1 }
     }

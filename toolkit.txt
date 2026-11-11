@@ -7,7 +7,6 @@
 # --- Self-elevate to Administrator ---
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Elevating to Administrator..." -ForegroundColor Yellow
-    # This works for both the USB script AND the web irm command
     $scriptPath = $MyInvocation.MyCommand.Definition
     if ($scriptPath -like "*toolkit.ps1*" -or $scriptPath -like "*toolkit.txt*") {
         Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
@@ -101,7 +100,6 @@ function Get-SystemHealth {
 
 function Repair-DomainTrust {
     Write-Header "Repair Domain Trust Relationship"
-
     $cs = Get-CimInstance Win32_ComputerSystem
     if ($cs.PartOfDomain -eq $false) {
         Write-Err "This computer is not joined to a domain."
@@ -112,7 +110,6 @@ function Repair-DomainTrust {
     Write-Host "Computer Name : $($cs.Name)"
     Write-Host "Domain        : $($cs.Domain)"
     Write-Host ""
-
     Write-Host "Testing connection to domain controller..." -NoNewline
     if (Test-ComputerSecureChannel -ErrorAction SilentlyContinue) {
         Write-OK " Secure channel is currently HEALTHY. No repair needed."
@@ -126,7 +123,6 @@ function Repair-DomainTrust {
     Write-Host "This will attempt to reset the machine password in Active Directory." -ForegroundColor Yellow
     Write-Host "You MUST provide Domain Admin credentials to proceed." -ForegroundColor Yellow
     Write-Host ""
-
     $confirm = Read-Host "Do you want to attempt the repair? (Y/N)"
     if ($confirm -match '^[Yy]') {
         try {
@@ -147,6 +143,70 @@ function Repair-DomainTrust {
     Pause
 }
 
+function Invoke-GPUpdate {
+    Write-Header "Force Group Policy Update"
+    Write-Host "Running gpupdate /force..."
+    Start-Process gpupdate.exe -ArgumentList "/force" -Wait -NoNewWindow
+    Write-OK "Group Policy updated."
+    Pause
+}
+
+function Reset-PrintSpooler {
+    Write-Header "Clear Print Spooler Queue"
+    Write-Host "Stopping Print Spooler service..." -NoNewline
+    Stop-Service -Name Spooler -Force -ErrorAction SilentlyContinue
+    Write-OK " Stopped."
+    Write-Host "Clearing stuck print jobs..." -NoNewline
+    Remove-Item "C:\Windows\System32\spool\PRINTERS\*" -Force -ErrorAction SilentlyContinue
+    Write-OK " Cleared."
+    Write-Host "Starting Print Spooler service..." -NoNewline
+    Start-Service -Name Spooler -ErrorAction SilentlyContinue
+    Write-OK " Started."
+    Write-Host "Printer queue reset. Try printing again." -ForegroundColor Green
+    Pause
+}
+
+function Get-UserInfo {
+    Write-Header "User & Admin Info"
+    Write-Host "--- Currently Logged In Users ---" -ForegroundColor Cyan
+    (Get-CimInstance Win32_ComputerSystem).UserName
+    Write-Host "`n--- Local Administrators ---" -ForegroundColor Cyan
+    Get-LocalGroupMember -Group "Administrators" | Select-Object Name, PrincipalSource | Format-Table -AutoSize
+    Pause
+}
+
+function Reset-Network {
+    Write-Header "Flush DNS & Reset Network"
+    Write-Host "Flushing DNS cache..." -NoNewline
+    ipconfig /flushdns | Out-Null
+    Write-OK " Done."
+    Write-Host "Renewing IP address..." -NoNewline
+    ipconfig /release | Out-Null
+    ipconfig /renew | Out-Null
+    Write-OK " Done."
+    Write-Host "Registering DNS..." -NoNewline
+    ipconfig /registerdns | Out-Null
+    Write-OK " Done."
+    Write-Host "Network reset complete." -ForegroundColor Green
+    Pause
+}
+
+function Remove-Bloatware {
+    Write-Header "Remove Standard Windows Bloatware"
+    $bloat = @(
+        "Microsoft.BingNews", "Microsoft.BingWeather", "Microsoft.GamingApp",
+        "Microsoft.GetHelp", "Microsoft.MicrosoftSolitaireCollection",
+        "Microsoft.ZuneMusic", "Microsoft.ZuneVideo", "Microsoft.XboxApp"
+    )
+    foreach ($app in $bloat) {
+        Write-Host "Removing $app..." -NoNewline
+        Get-AppxPackage -Name $app -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+        Write-OK " Done."
+    }
+    Write-Host "Bloatware removed." -ForegroundColor Green
+    Pause
+}
+
 # --- Menu loop ---
 do {
     Write-Header "IT Toolkit - Maintenance Menu"
@@ -155,15 +215,26 @@ do {
     Write-Host "  3) System Cleanup (temp/recycle bin)"
     Write-Host "  4) System Health Report"
     Write-Host "  5) Repair Domain Trust Relationship" -ForegroundColor Yellow
+    Write-Host "  6) Force Group Policy Update"
+    Write-Host "  7) Clear Print Spooler (Fix stuck printers)"
+    Write-Host "  8) Show Logged-in Users & Local Admins"
+    Write-Host "  9) Flush DNS / Reset Network"
+    Write-Host "  B) Remove Windows Bloatware"
     Write-Host "  Q) Quit"
     Write-Host ""
     $choice = Read-Host "Select an option"
+    
     switch ($choice.ToUpper()) {
         "1" { Install-Action1 }
         "2" { Remove-Atera }
         "3" { Invoke-Cleanup }
         "4" { Get-SystemHealth }
         "5" { Repair-DomainTrust }
+        "6" { Invoke-GPUpdate }
+        "7" { Reset-PrintSpooler }
+        "8" { Get-UserInfo }
+        "9" { Reset-Network }
+        "B" { Remove-Bloatware }
         "Q" { break }
         default { Write-Warn "Invalid option."; Start-Sleep 1 }
     }

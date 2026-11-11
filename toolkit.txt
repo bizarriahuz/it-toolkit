@@ -1,16 +1,16 @@
 #Requires -Version 5.1
-# IT Toolkit - Internal maintenance utility
-# Invoke: irm https://raw.githubusercontent.com/bizarriahuz/it-toolkit/main/toolkit.txt | iex
+# IT Toolkit - Internal maintenance utility (Offline USB Version)
 
-# Enforce TLS 1.2 for older Windows versions
+# Enforce TLS 1.2 for older Windows versions (needed for Action1 download)
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # --- Self-elevate to Administrator ---
+# This checks if you are running as Admin. If not, it elevates.
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Elevating to Administrator..." -ForegroundColor Yellow
-
-b015c7efcab66b49a9fe7e5f6c774ce392a2ecec
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm '$scriptUrl' | iex`""
+    # %~dp0 logic is handled by the .bat file, so we just relaunch the local script
+    $scriptPath = $MyInvocation.MyCommand.Definition
+    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
     return
 }
 
@@ -29,14 +29,12 @@ function Write-Err($msg)  { Write-Host "[FAIL] $msg" -ForegroundColor Red }
 # --- Menu actions ---
 function Install-Action1 {
     Write-Header "Install Action1 Agent"
-<<<<<<< HEAD
     $msiUrl = "https://app.na-2.action1.com/agent/21c1cc54-c786-11f1-9f08-c1a2c9c50f19/windows/agent(New_Endpoints).msi" 
-=======
-    $msiUrl = "https://app.na-2.action1.com/agent/21c1cc54-c786-11f1-9f08-c1a2c9c50f19/windows/agent(New_Endpoints).msi"   # <-- your Action1 MSI URL
->>>>>>> b015c7efcab66b49a9fe7e5f6c774ce392a2ecec
     $msiPath = "$env:TEMP\action1_agent.msi"
     try {
+        Write-Host "Downloading MSI (Requires Internet)..."
         Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
+        Write-Host "Installing silently..."
         Start-Process msiexec.exe -ArgumentList "/i `"$msiPath`" /quiet /qn /norestart" -Wait
         Write-OK "Action1 agent installed."
     } catch { Write-Err $_.Exception.Message }
@@ -101,7 +99,6 @@ function Get-SystemHealth {
 function Repair-DomainTrust {
     Write-Header "Repair Domain Trust Relationship"
     
-    # Check if on domain
     $cs = Get-CimInstance Win32_ComputerSystem
     if ($cs.PartOfDomain -eq $false) {
         Write-Err "This computer is not joined to a domain."
@@ -113,7 +110,6 @@ function Repair-DomainTrust {
     Write-Host "Domain        : $($cs.Domain)"
     Write-Host ""
 
-    # Check if we can reach the domain controller
     Write-Host "Testing connection to domain controller..." -NoNewline
     if (Test-ComputerSecureChannel -ErrorAction SilentlyContinue) {
         Write-OK " Secure channel is currently HEALTHY. No repair needed."

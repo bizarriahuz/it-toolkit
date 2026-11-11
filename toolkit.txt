@@ -8,7 +8,8 @@
 # --- Self-elevate to Administrator ---
 if (-NOT ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Elevating to Administrator..." -ForegroundColor Yellow
-    $scriptUrl = "https://raw.githubusercontent.com/bizarriahuz/it-toolkit/main/toolkit.txt"   # <-- Your real URL
+
+b015c7efcab66b49a9fe7e5f6c774ce392a2ecec
     Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"irm '$scriptUrl' | iex`""
     return
 }
@@ -28,7 +29,11 @@ function Write-Err($msg)  { Write-Host "[FAIL] $msg" -ForegroundColor Red }
 # --- Menu actions ---
 function Install-Action1 {
     Write-Header "Install Action1 Agent"
+<<<<<<< HEAD
     $msiUrl = "https://app.na-2.action1.com/agent/21c1cc54-c786-11f1-9f08-c1a2c9c50f19/windows/agent(New_Endpoints).msi" 
+=======
+    $msiUrl = "https://app.na-2.action1.com/agent/21c1cc54-c786-11f1-9f08-c1a2c9c50f19/windows/agent(New_Endpoints).msi"   # <-- your Action1 MSI URL
+>>>>>>> b015c7efcab66b49a9fe7e5f6c774ce392a2ecec
     $msiPath = "$env:TEMP\action1_agent.msi"
     try {
         Invoke-WebRequest -Uri $msiUrl -OutFile $msiPath -UseBasicParsing
